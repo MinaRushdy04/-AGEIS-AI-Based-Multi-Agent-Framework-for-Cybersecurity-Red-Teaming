@@ -1,0 +1,33 @@
+services:
+  bridge:
+    image: nginx
+    container_name: bridge
+    networks:
+      - decepticon-net
+      - sandbox-net
+
+  sandbox:
+   build:
+     context: .
+     dockerfile: Dockerfile.sandbox
+   container_name: sandbox
+   networks:
+     - sandbox-net
+
+  infra:
+    image: nginx
+    container_name: infra
+    networks:
+      - decepticon-net
+
+  dvwa:
+    image: vulnerables/web-dvwa
+    container_name: dvwa
+    ports:
+      - "8080:80"
+    networks:
+      - sandbox-net
+
+networks:
+  decepticon-net:
+  sandbox-net:

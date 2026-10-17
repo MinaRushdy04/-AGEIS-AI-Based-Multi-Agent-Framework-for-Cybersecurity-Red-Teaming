@@ -1,0 +1,22 @@
+FROM alpine:latest
+
+RUN apk update && apk add --no-cache \
+    nmap \
+    nmap-scripts \
+    curl \
+    wget \
+    hydra \
+    bash \
+    python3 \
+    py3-pip \
+    git \
+    perl \
+    perl-xml-writer
+
+RUN pip install --break-system-packages sqlmap
+
+RUN git clone https://github.com/sullo/nikto /opt/nikto && \
+    ln -s /opt/nikto/program/nikto.pl /usr/local/bin/nikto && \
+    chmod +x /opt/nikto/program/nikto.pl
+
+CMD ["sleep", "infinity"]
