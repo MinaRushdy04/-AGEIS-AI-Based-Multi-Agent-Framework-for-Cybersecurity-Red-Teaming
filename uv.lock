@@ -1,0 +1,23 @@
+version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[[package]]
+name = "graduation-project"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "langchain-gemini" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "langchain-gemini", specifier = ">=0.1.1" }]
+
+[[package]]
+name = "langchain-gemini"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a6/0b/efd66ddccd9d0022ed880ca08bf750e0dffa0c98386e1f157f8466bddde6/langchain_gemini-0.1.1.tar.gz", hash = "sha256:bd7c16b32311c213a3f59b6e4fe9437f3faff56008c44bdbc9e16867c9e2bbc7", size = 641, upload-time = "2024-10-18T16:12:07.351Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/a9/47bb5c53f304653c6b0c41e1c00c0440446bd279f82cece251355d509053/langchain_gemini-0.1.1-py3-none-any.whl", hash = "sha256:7949b6bbf6efefdff545a22239a14878f1cdac34c40ae2e65eb4a29f5e9917c3", size = 1105, upload-time = "2024-10-18T16:12:05.793Z" },
+]

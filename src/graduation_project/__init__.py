@@ -1,0 +1,2 @@
+"""graduation_project package."""
+
