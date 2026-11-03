@@ -11,3 +11,8 @@ wheels/
 
 # Environment secrets
 .env
+# Folder/files used for internal testing
+sandbox/
+testing don't touch.py
+# Orchestrator run logs
+runs/
