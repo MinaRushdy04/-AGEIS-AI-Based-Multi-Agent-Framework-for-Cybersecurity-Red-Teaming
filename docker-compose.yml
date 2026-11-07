@@ -1,5 +1,11 @@
-
 services:
+  bridge:
+    image: nginx
+    container_name: bridge
+    networks:
+      - management-net
+      - sandbox-net
+
   sandbox:
     build:
       context: .
@@ -18,7 +24,7 @@ services:
     image: vulnerables/web-dvwa
     container_name: dvwa
     ports:
-      - "127.0.0.1:8080:80"
+      - "8080:80"
     networks:
       - sandbox-net
 
@@ -31,4 +37,3 @@ networks:
     name: sandbox-net
     driver: bridge
     internal: true
-
