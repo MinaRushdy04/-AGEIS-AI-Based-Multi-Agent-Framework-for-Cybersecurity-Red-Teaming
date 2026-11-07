@@ -1,0 +1,34 @@
+
+services:
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    container_name: sandbox
+    networks:
+      - sandbox-net
+
+  infra:
+    image: nginx
+    container_name: infra
+    networks:
+      - management-net
+
+  dvwa:
+    image: vulnerables/web-dvwa
+    container_name: dvwa
+    ports:
+      - "127.0.0.1:8080:80"
+    networks:
+      - sandbox-net
+
+networks:
+  management-net:
+    name: management-net
+    driver: bridge
+
+  sandbox-net:
+    name: sandbox-net
+    driver: bridge
+    internal: true
+

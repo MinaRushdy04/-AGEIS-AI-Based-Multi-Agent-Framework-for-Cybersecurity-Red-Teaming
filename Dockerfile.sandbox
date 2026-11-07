@@ -1,0 +1,28 @@
+
+FROM kalilinux/kali-rolling
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nmap \
+    gobuster \
+    nikto \
+    sqlmap \
+    metasploit-framework \
+    hydra \
+    curl \
+    wget \
+    git \
+    bash \
+    python3 \
+    python3-pip \
+    perl \
+    ca-certificates \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install LinPEAS
+RUN git clone --depth 1 https://github.com/peass-ng/PEASS-ng.git /opt/PEASS-ng \
+    && ln -s /opt/PEASS-ng/linPEAS/linpeas.sh /usr/local/bin/linpeas
+
+CMD ["sleep", "infinity"]
