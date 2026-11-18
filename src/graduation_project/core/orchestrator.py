@@ -10,12 +10,13 @@ Loop, per step:
   2. Build a FRESH task with RoE + only the relevant prior findings.
   3. Enforce scope in code, then dispatch to the objective's agent.
   4. Record the outcome to persistent storage; retry transient failures.
-  5. On flag capture, fast-forward past remaining attack phases to REPORT.
+  5. On verified flag capture, fast-forward past remaining attack phases to REPORT.
 Stops when the budget is spent or no objective remains.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from graduation_project.core.contracts import Agent, AgentResult, Task
@@ -45,11 +46,14 @@ class Orchestrator:
         roe: RulesOfEngagement,
         store: Store,
         budget: Budget | None = None,
+        *,
+        flag_evaluator: Callable[[str], bool] | None = None,
     ):
         self.engagement = engagement
         self.roe = roe
         self.store = store
         self.budget = budget or Budget()
+        self._flag_evaluator = flag_evaluator
         self._agents: dict[str, Agent] = {}
         self._steps = 0
 
@@ -138,20 +142,9 @@ class Orchestrator:
         )
 
     def _record(self, obj: Objective, result: AgentResult) -> None:
+        self.store.record_result(obj.id, obj.attempts, result)
         obj.outcome = result.outcome
         obj.result_summary = result.summary
-        for finding in result.findings:
-            self.store.add_finding(finding)
-        if result.flag:
-            self.engagement.flag = result.flag
-
-        self.store.log_event(
-            "result",
-            objective_id=obj.id,
-            outcome=result.outcome.value,
-            summary=result.summary,
-            flag=bool(result.flag),
-        )
 
         # Retry policy: transient outcomes requeue until the budget is spent.
         if (
@@ -162,8 +155,26 @@ class Orchestrator:
         else:
             obj.status = ObjectiveStatus.DONE
 
-        # Flag captured: skip remaining attack phases, go straight to REPORT.
-        if self.engagement.flag is not None:
+        self._evaluate_flag(obj, result.flag)
+
+    def _evaluate_flag(self, obj: Objective, candidate: str | None) -> None:
+        if not candidate or self.engagement.flag is not None:
+            return
+
+        if self._flag_evaluator is None:
+            status = "unavailable"
+        else:
+            try:
+                status = "accepted" if self._flag_evaluator(candidate) is True else "rejected"
+            except Exception:
+                # Evaluator errors leave the candidate unverified. Details can contain secrets.
+                status = "error"
+
+        self.store.log_event(
+            "flag_evaluation", objective_id=obj.id, attempt=obj.attempts, status=status
+        )
+        if status == "accepted":
+            self.engagement.flag = candidate
             self._skip_to_report()
 
     def _skip_to_report(self) -> None:
