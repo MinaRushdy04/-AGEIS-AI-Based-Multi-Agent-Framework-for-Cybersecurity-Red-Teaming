@@ -43,5 +43,4 @@ networks:
     internal: true         
 
   web-expose:
-    name: web-expose
-    driver: bridge         
+    driver: bridge      
