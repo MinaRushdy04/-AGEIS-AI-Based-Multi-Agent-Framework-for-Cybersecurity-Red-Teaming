@@ -1,27 +1,67 @@
+# Dockerfile.sandbox — Kali attack sandbox for the AI Red-Team lab (Step 2)
+# -----------------------------------------------------------------------------
+# BUILD-TIME : host has internet -> apt install + PEASS download happen here.
+# RUN-TIME   : container runs OFFLINE on an internal docker network.
+# Build:  docker build -f Dockerfile.sandbox -t sandbox .
+# -----------------------------------------------------------------------------
 FROM kalilinux/kali-rolling
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PEASS_DIR=/opt/peass
+ARG PEASS_VERSION=latest
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    nmap \
-    gobuster \
-    nikto \
-    sqlmap \
-    metasploit-framework \
-    hydra \
-    curl \
-    wget \
-    git \
-    bash \
-    python3 \
-    python3-pip \
-    perl \
-    ca-certificates \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+# ---- Reliable mirror + retries ---------------------------------------------
+RUN echo 'deb http://kali.download/kali kali-rolling main contrib non-free non-free-firmware' \
+      > /etc/apt/sources.list \
+    && echo 'Acquire::Retries "10";' > /etc/apt/apt.conf.d/80-retries
 
-# Install LinPEAS
-RUN git clone --depth 1 https://github.com/peass-ng/PEASS-ng.git /opt/PEASS-ng \
-    && ln -s /opt/PEASS-ng/linPEAS/linpeas.sh /usr/local/bin/linpeas
+# ---- Light toolchain first (fast -> cached on its own layer) ----------------
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends --fix-missing \
+      nmap gobuster nikto sqlmap hydra tmux \
+      curl wget git bash python3 python3-pip perl ca-certificates
 
-CMD ["sleep", "infinity"]
+# ---- Metasploit on its OWN layer (heavy; isolate the flaky one) -------------
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends --fix-missing \
+      metasploit-framework
+
+# ---- Phase 4 Post-Exploitation: stage PEASS (LinPEAS + WinPEAS) -------------
+RUN mkdir -p "${PEASS_DIR}" \
+    && if [ "${PEASS_VERSION}" = "latest" ]; then \
+         BASE="https://github.com/peass-ng/PEASS-ng/releases/latest/download"; \
+       else \
+         BASE="https://github.com/peass-ng/PEASS-ng/releases/download/${PEASS_VERSION}"; \
+       fi \
+    && curl -fsSL "${BASE}/linpeas.sh"     -o "${PEASS_DIR}/linpeas.sh" \
+    && curl -fsSL "${BASE}/winPEASx64.exe" -o "${PEASS_DIR}/winPEASx64.exe" \
+    && chmod +x "${PEASS_DIR}/linpeas.sh" \
+    && ln -sf "${PEASS_DIR}/linpeas.sh" /usr/local/bin/linpeas
+
+# ---- Ensure gobuster explicitly (flaky mirror + --fix-missing may skip it) --
+# Small package, fast. No --fix-missing here, so it fails loudly if unfetched.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends gobuster \
+    && command -v gobuster
+
+# ---- Build-time verification gate (fail fast, like `decepticon doctor`) -----
+COPY verify_tooling.sh /usr/local/bin/verify_tooling.sh
+# self-heal Windows CRLF line endings so the shebang works inside Linux
+RUN sed -i 's/\r$//' /usr/local/bin/verify_tooling.sh \
+    && chmod +x /usr/local/bin/verify_tooling.sh \
+    && /usr/local/bin/verify_tooling.sh
+
+# ---- Exec API (Step 4): FastAPI command-execution daemon --------------------
+# Installed at BUILD time (host online); serves OFFLINE at runtime inside Kali.
+RUN pip install --no-cache-dir --break-system-packages --retries 10 \
+      fastapi "uvicorn[standard]"
+COPY exec_server.py /opt/exec_server.py
+
+WORKDIR /workspace
+EXPOSE 9999
+# The sandbox now runs the exec daemon instead of sleeping.
+# Agents call http://sandbox:9999/execute  (they must join sandbox-net).
+CMD ["uvicorn", "exec_server:app", "--app-dir", "/opt", "--host", "0.0.0.0", "--port", "9999"]

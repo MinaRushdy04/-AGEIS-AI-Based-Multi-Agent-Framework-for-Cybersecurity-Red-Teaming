@@ -5,14 +5,18 @@ services:
     networks:
       - management-net
       - sandbox-net
-
+  metasploitable2:
+    image: tleemcjr/metasploitable2
+    container_name: metasploitable2
+    networks:
+      - sandbox-net
   sandbox:
     build:
       context: .
       dockerfile: Dockerfile.sandbox
     container_name: sandbox
     networks:
-      - sandbox-net
+      - sandbox-net       
 
   infra:
     image: nginx
@@ -24,10 +28,10 @@ services:
     image: vulnerables/web-dvwa
     container_name: dvwa
     ports:
-      - "8080:80"
+      - "8080:80"         
     networks:
-      - sandbox-net
-
+      - sandbox-net        
+      - web-expose         
 networks:
   management-net:
     name: management-net
@@ -36,4 +40,8 @@ networks:
   sandbox-net:
     name: sandbox-net
     driver: bridge
-    internal: true
+    internal: true         
+
+  web-expose:
+    name: web-expose
+    driver: bridge         
