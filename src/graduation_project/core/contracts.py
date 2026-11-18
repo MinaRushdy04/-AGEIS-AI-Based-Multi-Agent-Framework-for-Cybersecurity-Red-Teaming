@@ -51,7 +51,7 @@ class AgentResult:
     outcome: Outcome
     summary: str
     findings: list[Finding] = field(default_factory=list)
-    flag: str | None = None
+    flag: str | None = None  # Candidate until accepted by the trusted evaluator.
     raw: dict[str, Any] = field(default_factory=dict)
 
 

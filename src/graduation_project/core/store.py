@@ -90,7 +90,7 @@ class Store:
             "attempt": attempt,
             "outcome": result.outcome.value,
             "summary": result.summary,
-            "flag": bool(result.flag),
+            "flag": bool(result.flag),  # Whether the agent submitted a candidate.
         }))
         self._write_events(rows)
 
