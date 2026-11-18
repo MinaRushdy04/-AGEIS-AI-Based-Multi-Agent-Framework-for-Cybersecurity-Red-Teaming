@@ -17,7 +17,7 @@ TARGET = "http://dvwa"
 def main():
     engagement = default_plan(TARGET)
     roe = RulesOfEngagement.for_target(TARGET)
-    store = Store("runs/engagement.jsonl")
+    store = Store("runs/engagement.sqlite3")
     orch = Orchestrator(engagement, roe, store, Budget())
 
     # Specialist agents register here once built, e.g.:
@@ -26,6 +26,7 @@ def main():
 
     summary = orch.run()
 
+    print(f"Run ID : {store.run_id}")
     print(f"Target : {summary['target']}")
     print(f"Flag   : {summary['flag']}")
     print(f"Steps  : {summary['steps']}")

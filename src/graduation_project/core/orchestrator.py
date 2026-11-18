@@ -138,20 +138,11 @@ class Orchestrator:
         )
 
     def _record(self, obj: Objective, result: AgentResult) -> None:
+        self.store.record_result(obj.id, obj.attempts, result)
         obj.outcome = result.outcome
         obj.result_summary = result.summary
-        for finding in result.findings:
-            self.store.add_finding(finding)
         if result.flag:
             self.engagement.flag = result.flag
-
-        self.store.log_event(
-            "result",
-            objective_id=obj.id,
-            outcome=result.outcome.value,
-            summary=result.summary,
-            flag=bool(result.flag),
-        )
 
         # Retry policy: transient outcomes requeue until the budget is spent.
         if (
