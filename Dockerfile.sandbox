@@ -60,6 +60,20 @@ RUN pip install --no-cache-dir --break-system-packages --retries 10 \
       fastapi "uvicorn[standard]"
 COPY exec_server.py /opt/exec_server.py
 
+# ---- Wordlist for gobuster content discovery (Step 6) -----------------------
+# gobuster needs a wordlist. Install `dirb` (ships common.txt), then symlink it
+# to the conventional path the recon tool looks for. Verified at build time:
+# the build FAILS if the wordlist ends up missing. Placed last so it never
+# invalidates the cache of the heavy layers above.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends dirb \
+    && CW="$(find /usr/share -type f -name common.txt -path '*dirb*' | head -n1)" \
+    && test -n "$CW" \
+    && mkdir -p /usr/share/wordlists/dirb \
+    && ln -sf "$CW" /usr/share/wordlists/dirb/common.txt \
+    && test -f /usr/share/wordlists/dirb/common.txt
+
 WORKDIR /workspace
 EXPOSE 9999
 # The sandbox now runs the exec daemon instead of sleeping.
