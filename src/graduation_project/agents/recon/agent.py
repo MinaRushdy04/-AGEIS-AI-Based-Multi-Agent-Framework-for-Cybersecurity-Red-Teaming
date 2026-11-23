@@ -19,6 +19,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from graduation_project.agents.recon.gobuster_scan import (
+    ToolUnavailable as GobusterUnavailable,
+    run_gobuster_scan,
+)
 from graduation_project.agents.recon.header_check import (
     ToolUnavailable as HeaderToolUnavailable,
     run_header_check,
@@ -68,6 +72,7 @@ class ReconAgent:
         steps.append(self._run_nmap(task, host, findings))
         steps.append(self._run_nikto(task, findings))
         steps.append(self._run_headers(task, findings))
+        steps.append(self._run_gobuster(task, findings))
 
         ran_steps = [s for s in steps if s.ran]
         if not ran_steps:
@@ -179,3 +184,31 @@ class ReconAgent:
         return _StepOutcome(
             "headers", ran=True, note=f"{len(result.missing_security_headers)} missing, {len(result.banners)} banner(s)"
         )
+
+    def _run_gobuster(self, task: Task, findings: list[Finding]) -> _StepOutcome:
+        try:
+            paths = run_gobuster_scan(task.target)
+        except GobusterUnavailable as exc:
+            return _StepOutcome("gobuster", ran=False, note=str(exc))
+        except Exception as exc:
+            return _StepOutcome("gobuster", ran=False, note=f"scan failed: {exc}")
+
+        for p in paths:
+            findings.append(
+                Finding(
+                    objective_id=task.objective_id,
+                    agent_type=self.agent_type,
+                    target=task.target,
+                    title=f"Discovered path {p.path} (Status {p.status})",
+                    detail=p.as_text(),
+                    severity="info",
+                    data={
+                        "path": p.path,
+                        "status": p.status,
+                        "size": p.size,
+                        "redirect": p.redirect,
+                        "source": "gobuster",
+                    },
+                )
+            )
+        return _StepOutcome("gobuster", ran=True, note=f"{len(paths)} path(s)")
