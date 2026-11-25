@@ -2,7 +2,7 @@
 
 **Project:** AEGIS — AI-Based Multi-Agent Framework for Cybersecurity Red Teaming
 **Scope:** How raw recon-tool output is turned into structured data the agent can reason over.
-**Status:** nmap / nikto / headers implemented by the agent team; gobuster added in this step. All four parsers verified against sample outputs (see §7).
+**Status:** nmap / nikto / headers implemented by the agent team; gobuster added in a prior step. **Exploit tooling added this step: sqlmap (SQL injection) and hydra (web login brute force)** — the Exploit agent uses them to detect vulnerabilities, with the built-in curl probes kept as a fallback. All parsers verified against sample outputs (see §9).
 
 ---
 
@@ -98,7 +98,57 @@ layout is not.
 
 ---
 
-## 7. Verification
+## 7. sqlmap — SQL injection (exploit tooling, added this step)
+
+- **Command:** `sqlmap -u <url?param=val> --batch --level=1 --risk=1 --disable-coloring [--cookie <cookie>] [-p <param>]`
+  - **Detection only / non-destructive:** never `--dump`, `--sql-shell`, or `--os-shell`; `--risk=1` keeps sqlmap off heavy / OR-based payloads. It confirms the parameter is injectable and names the technique(s) + back-end DBMS **without reading or modifying data**.
+  - `--cookie` carries the authenticated DVWA session (`PHPSESSID=...; security=low`).
+- **Raw output (text):**
+  ```
+  Parameter: id (GET)
+      Type: boolean-based blind
+      Payload: id=1' AND 1234=1234&Submit=Submit
+      Type: error-based
+      Payload: id=1' AND (SELECT ...)&Submit=Submit
+  back-end DBMS: MySQL >= 5.0
+  ```
+  Parsed per-parameter into `parameter`, `method`, `types`, a representative `payload`, and `dbms`.
+- **Maps to `Finding.data`:**
+  ```json
+  {"source":"sqlmap","parameter":"id","methods":["boolean-based blind","error-based"],
+   "dbms":"MySQL >= 5.0","cwe":"CWE-89","mitre":["T1190"],"confidence":"verified",
+   "confirmed":true,"payload":"1'","success_indicator":"error in your SQL syntax|..."}
+  ```
+  `mitre` is already mapped in `attack_map.py` (`sqlmap` → T1190). The `confirmed` / `payload` /
+  `success_indicator` keys let the Verifier agent reproduce the finding.
+- **Agent use:** `_try_injection` runs sqlmap first; on `ToolUnavailable` (sqlmap missing) or no
+  result it falls back to the built-in non-destructive curl probe.
+
+---
+
+## 8. hydra — web login brute force (exploit tooling, added this step)
+
+- **Command:** `hydra -l <user> -P <small-list> -s <port> <host> http-get-form "<path>:username=^USER^&password=^PASS^&Login=Login:F=<fail text>:H=Cookie\: <cookie>"`
+  - **Non-destructive / NOT a DoS:** a SMALL fixed password list (the agent's weak-credential list), not a flood — it only submits login attempts and changes nothing.
+  - `F=` is the DVWA failure marker (`Username and/or password incorrect.`); `H=` passes the authenticated cookie.
+- **Raw output (text):**
+  ```
+  [80][http-get-form] host: dvwa   login: admin   password: password
+  ```
+  Parsed with a regex into `username` / `password`.
+- **Maps to `Finding.data`:**
+  ```json
+  {"source":"hydra","username":"admin","password":"password","cwe":"CWE-307",
+   "mitre":["T1110.001"],"confidence":"probable","confirmed":true,
+   "payload":"admin:password","success_indicator":"Welcome to the password protected area"}
+  ```
+  `mitre` is already mapped in `attack_map.py` (`hydra` → T1110.001).
+- **Agent use:** `_try_authentication` runs hydra first; on `ToolUnavailable` (hydra missing) or no
+  result it falls back to the built-in curl guessing probe.
+
+---
+
+## 9. Verification
 
 Each parser was exercised with a representative raw sample and checked to produce the correct
 structured fields:
@@ -109,6 +159,8 @@ structured fields:
 | nikto | JSON `vulnerabilities` array | id + message parsed ✅ |
 | headers | curl header block with a `Server` banner, no CSP | banner captured; missing headers detected ✅ |
 | gobuster | 3 result lines + 1 junk line | 3 paths parsed, junk ignored; status/size/redirect correct ✅ |
+| sqlmap | injection block (3 types) + DBMS line; and a clean no-injection sample | parameter/method/types/payload/DBMS parsed; clean sample → no false positive ✅ |
+| hydra | `[80][http-get-form] ... login: admin password: password` | credentials parsed ✅ |
 
 End-to-end verification (running each tool live against DVWA in the lab) is done on the lab
 host, since the tools and target run inside the sandbox network.
