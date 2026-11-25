@@ -9,7 +9,9 @@ network) — it does not replace it.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 
@@ -37,6 +39,30 @@ class RulesOfEngagement:
         if host is None:
             raise ValueError(f"Cannot derive a host from target {target!r}")
         return cls(allowed_hosts=frozenset({host}))
+
+    @classmethod
+    def from_roe_file(cls, path: str | Path = "plan/roe.json") -> "RulesOfEngagement":
+        """Build the scope allowlist from the ``machine_enforcement`` block of a
+        Rules-of-Engagement JSON file (``plan/roe.json``).
+
+        This is the Decepticon pattern: the orchestrator guard rail reads the
+        machine RoE rather than a single hardcoded target, so the engagement
+        scope comes from one reviewed source of truth. Only the in-scope hosts
+        become the allowlist; anything else (including the file's out_of_scope
+        list) is rejected by ``enforce`` because it is not in the allowlist.
+        """
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        machine = data.get("machine_enforcement", {})
+        hosts = {
+            (entry.get("target") or "").lower()
+            for entry in machine.get("in_scope", [])
+            if entry.get("target")
+        }
+        if not hosts:
+            raise ValueError(
+                f"no in-scope hosts in machine_enforcement of {path!r}"
+            )
+        return cls(allowed_hosts=frozenset(hosts))
 
     def is_in_scope(self, target: str) -> bool:
         host = host_of(target)

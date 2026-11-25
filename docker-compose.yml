@@ -15,8 +15,11 @@ services:
       context: .
       dockerfile: Dockerfile.sandbox
     container_name: sandbox
+    volumes:
+      # read-only machine RoE so the Exec API can enforce scope (plan/roe.json)
+      - ./plan:/opt/plan:ro
     networks:
-      - sandbox-net       
+      - sandbox-net
 
   infra:
     image: nginx
