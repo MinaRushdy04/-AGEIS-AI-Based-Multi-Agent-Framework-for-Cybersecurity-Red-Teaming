@@ -2,7 +2,7 @@
 
 **Project:** AEGIS — AI-Based Multi-Agent Framework for Cybersecurity Red Teaming
 **Scope:** How raw recon-tool output is turned into structured data the agent can reason over.
-**Status:** nmap / nikto / headers implemented by the agent team; gobuster added in a prior step. **Exploit tooling added this step: sqlmap (SQL injection) and hydra (web login brute force)** — the Exploit agent uses them to detect vulnerabilities, with the built-in curl probes kept as a fallback. All parsers verified against sample outputs (see §9).
+**Status:** nmap / nikto / headers implemented by the agent team; gobuster added in a prior step. **Exploit tooling: sqlmap (SQL injection) and hydra (web login brute force)** — the Exploit agent uses them to detect vulnerabilities, with the built-in curl probes kept as a fallback — plus **metasploit** (non-destructive exploit-module `check`) as a standalone tool for in-scope hosts with a matching module. All parsers verified against sample outputs (see §10).
 
 ---
 
@@ -148,7 +148,32 @@ layout is not.
 
 ---
 
-## 9. Verification
+## 9. metasploit — exploit-module check (exploit tooling, added this step)
+
+- **Command:** `msfconsole -q -n -x "use <module>; set RHOSTS <host>; [set RPORT ..]; check; exit -y"`
+  - **Detection only / non-destructive:** issues ONLY the `check` command, which asks a module whether the target *appears* exploitable **without launching any exploit/payload**. It never runs `exploit`/`run`.
+  - Best suited to services with a known CVE/exploit module — **not** DVWA's intentional web bugs (sqlmap/hydra cover those). Kept generic so the agent can check any in-scope host that has a matching module.
+- **Raw output (text):**
+  ```
+  [+] 10.0.0.5:445 - The target is vulnerable.
+  [*] 10.0.0.5:80  - The target appears to be vulnerable.
+  [-] 10.0.0.5:80  - The target is not exploitable.
+  ```
+  Parsed into a normalized `state`: `vulnerable` / `appears` / `detected` / `safe` / `unsupported` / `unknown` (`vulnerable` and `appears` count as a real finding).
+- **Maps to `Finding.data`:**
+  ```json
+  {"source":"metasploit","module":"exploit/...","state":"appears",
+   "cwe":"CWE-...","mitre":["T1190"],"detail":"<the CheckCode line>"}
+  ```
+  `mitre` is already mapped in `attack_map.py` (`metasploit` → T1190).
+- **Status:** delivered as a standalone tool in the exploit package. It is **not wired to a
+  DVWA handler** because DVWA has no matching exploit module; it is ready for the agent to call
+  when an in-scope host with a matching module appears. (Honest note: a real "vulnerable" result
+  cannot be demonstrated against DVWA within the current RoE.)
+
+---
+
+## 10. Verification
 
 Each parser was exercised with a representative raw sample and checked to produce the correct
 structured fields:
@@ -161,6 +186,7 @@ structured fields:
 | gobuster | 3 result lines + 1 junk line | 3 paths parsed, junk ignored; status/size/redirect correct ✅ |
 | sqlmap | injection block (3 types) + DBMS line; and a clean no-injection sample | parameter/method/types/payload/DBMS parsed; clean sample → no false positive ✅ |
 | hydra | `[80][http-get-form] ... login: admin password: password` | credentials parsed ✅ |
+| metasploit | five CheckCode samples (vulnerable/appears/safe/unsupported/unknown) | each classified to the correct state; vuln states flagged ✅ |
 
 End-to-end verification (running each tool live against DVWA in the lab) is done on the lab
 host, since the tools and target run inside the sandbox network.
