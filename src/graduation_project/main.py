@@ -13,6 +13,7 @@ someone fills those in, Exploit objectives will resolve to NEEDS_INFO.
 
 from graduation_project.agents.exploit import ExploitAgent
 from graduation_project.agents.recon import ReconAgent
+from graduation_project.agents.verifier import VerifierAgent
 from graduation_project.core.engagement import default_plan
 from graduation_project.core.orchestrator import Budget, Orchestrator
 from graduation_project.core.roe import RulesOfEngagement
@@ -29,9 +30,10 @@ def main():
 
     orch.register_agent(ReconAgent())
     orch.register_agent(ExploitAgent())
-    # Remaining specialists register here once built, e.g.:
-    #   from graduation_project.agents.verifier.agent import VerifierAgent
-    #   orch.register_agent(VerifierAgent())
+    orch.register_agent(VerifierAgent())
+    # Remaining specialist registers here once built, e.g.:
+    #   from graduation_project.agents.reporter.agent import ReporterAgent
+    #   orch.register_agent(ReporterAgent())
 
     summary = orch.run()
 
