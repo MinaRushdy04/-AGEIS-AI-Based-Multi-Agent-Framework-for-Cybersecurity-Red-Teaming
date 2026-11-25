@@ -18,15 +18,13 @@ flag and therefore can never report SOLVED:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urljoin
 
-from graduation_project.agents.recon.gobuster_scan import (
-    ToolUnavailable as GobusterUnavailable,
-    run_gobuster_scan,
-)
 from graduation_project.agents.recon.header_check import (
     ToolUnavailable as HeaderToolUnavailable,
     run_header_check,
 )
+from graduation_project.agents.recon.llm_planner import LLMUnavailable, suggest_probes
 from graduation_project.agents.recon.nikto_scan import (
     ToolUnavailable as NiktoUnavailable,
     run_nikto_scan,
@@ -35,6 +33,11 @@ from graduation_project.agents.recon.nmap_scan import (
     ToolUnavailable as NmapUnavailable,
     run_nmap_scan,
 )
+from graduation_project.agents.recon.probe_fetch import (
+    ToolUnavailable as ProbeFetchUnavailable,
+    fetch_path,
+)
+from graduation_project.config import GEMINI_API_KEY
 from graduation_project.core.contracts import AgentResult, Finding, Task
 from graduation_project.core.outcomes import Outcome
 from graduation_project.core.roe import RoEViolation, host_of
@@ -72,7 +75,7 @@ class ReconAgent:
         steps.append(self._run_nmap(task, host, findings))
         steps.append(self._run_nikto(task, findings))
         steps.append(self._run_headers(task, findings))
-        steps.append(self._run_gobuster(task, findings))
+        steps.append(self._run_llm_planner(task, findings))
 
         ran_steps = [s for s in steps if s.ran]
         if not ran_steps:
@@ -185,30 +188,60 @@ class ReconAgent:
             "headers", ran=True, note=f"{len(result.missing_security_headers)} missing, {len(result.banners)} banner(s)"
         )
 
-    def _run_gobuster(self, task: Task, findings: list[Finding]) -> _StepOutcome:
-        try:
-            paths = run_gobuster_scan(task.target)
-        except GobusterUnavailable as exc:
-            return _StepOutcome("gobuster", ran=False, note=str(exc))
-        except Exception as exc:
-            return _StepOutcome("gobuster", ran=False, note=f"scan failed: {exc}")
+    def _run_llm_planner(self, task: Task, findings: list[Finding]) -> _StepOutcome:
+        """The hybrid 'AI' layer: Gemini reads what the deterministic tools
+        already found and suggests a few extra passive paths worth a GET
+        request (e.g. /robots.txt, /.git/config). Still pure recon — the
+        model is never given the ability to submit forms or run exploits,
+        only to name paths, and every suggestion is re-validated and
+        scope-checked here before anything is fetched.
+        """
+        if not findings:
+            return _StepOutcome("llm_planner", ran=False, note="no findings yet to reason over")
 
-        for p in paths:
-            findings.append(
-                Finding(
-                    objective_id=task.objective_id,
-                    agent_type=self.agent_type,
-                    target=task.target,
-                    title=f"Discovered path {p.path} (Status {p.status})",
-                    detail=p.as_text(),
-                    severity="info",
-                    data={
-                        "path": p.path,
-                        "status": p.status,
-                        "size": p.size,
-                        "redirect": p.redirect,
-                        "source": "gobuster",
-                    },
+        evidence_summary = "\n".join(f"- {f.title}: {f.detail}" for f in findings)
+        try:
+            probes = suggest_probes(evidence_summary, GEMINI_API_KEY)
+        except LLMUnavailable as exc:
+            return _StepOutcome("llm_planner", ran=False, note=str(exc))
+
+        if not probes:
+            return _StepOutcome("llm_planner", ran=True, note="no additional paths suggested")
+
+        checked = 0
+        for probe in probes:
+            url = urljoin(task.target, probe.path)
+            # Defense in depth: re-validate scope even though the path was
+            # already filtered to be relative — urljoin could still resolve
+            # somewhere unexpected on a malformed target.
+            if task.roe is not None and not task.roe.is_in_scope(url):
+                continue
+            try:
+                status, snippet = fetch_path(url)
+            except (ProbeFetchUnavailable, RuntimeError) as exc:
+                findings.append(
+                    Finding(
+                        objective_id=task.objective_id,
+                        agent_type=self.agent_type,
+                        target=task.target,
+                        title=f"LLM-suggested probe failed: {probe.path}",
+                        detail=str(exc),
+                        severity="info",
+                        data={"path": probe.path, "source": "llm_planner", "error": str(exc)},
+                    )
                 )
-            )
-        return _StepOutcome("gobuster", ran=True, note=f"{len(paths)} path(s)")
+                continue
+            checked += 1
+            if status and status != 404:
+                findings.append(
+                    Finding(
+                        objective_id=task.objective_id,
+                        agent_type=self.agent_type,
+                        target=task.target,
+                        title=f"LLM-suggested path responded: {probe.path} ({status})",
+                        detail=snippet,
+                        severity="info",
+                        data={"path": probe.path, "status": status, "source": "llm_planner"},
+                    )
+                )
+        return _StepOutcome("llm_planner", ran=True, note=f"{checked} path(s) checked")
