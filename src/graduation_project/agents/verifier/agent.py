@@ -121,18 +121,31 @@ class VerifierAgent:
     # -- step 1: reproduction (STUB — see module docstring) ---------------------
 
     def _reproduce(self, task: Task, finding: Finding) -> str:
-        """Resend `finding.data['payload']` to the target and return the
-        fresh response text.
+        """Resend `finding.data['payload']` to the target and return the fresh
+        response text — by REUSING the Exploit agent's own sender, not new code.
 
-        NOT IMPLEMENTED HERE ON PURPOSE. Wire this to the same send
-        function the Exploit agent's technique handler already uses for
-        this finding's category — e.g. if `finding.data` came from the
-        injection handler's sqlmap/manual-probe code, call that same
-        sending code again with the same payload, against the same URL.
+        The Exploit agent exposes a single sending entry point,
+        `resend_payload(target, source, parameter, payload)`. We hand it the
+        values the Exploit finding recorded (`source`, `parameter`, `payload`)
+        so the identical probe is re-issued against the same endpoint. Still
+        non-destructive — it only re-runs a detection probe.
         """
-        raise ReproductionUnavailable(
-            "no payload-resend function wired up yet — see agent.py docstring"
-        )
+        from graduation_project.agents.exploit.agent import resend_payload
+
+        source = finding.data.get("source")
+        payload = finding.data.get("payload")
+        parameter = finding.data.get("parameter")
+        if not source:
+            raise ReproductionUnavailable(
+                "finding has no 'source' tag saying which exploit probe to re-send"
+            )
+        if not payload or not str(payload).strip():
+            raise ReproductionUnavailable("finding has no 'payload' to re-send")
+
+        try:
+            return resend_payload(task.target, source, parameter, payload)
+        except Exception as exc:  # network/tooling failure during reproduction
+            raise ReproductionUnavailable(f"re-send failed: {exc}") from exc
 
     # -- steps 2 & 3: compare evidence, decide CONFIRMED/REJECTED ---------------
 
