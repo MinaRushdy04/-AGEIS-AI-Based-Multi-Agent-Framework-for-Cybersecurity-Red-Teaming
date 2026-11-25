@@ -29,15 +29,21 @@
   ],
   "escalation_contacts": [
     {
-      "name": "<Project team lead name>",
-      "role": "AEGIS Project Lead",
-      "channel": "email: <fill in>",
+      "name": "AEGIS Project Team (3 members — no single lead)",
+      "role": "Project Team",
+      "channel": "email: glorianassif18@gmail.com, elariasamy2468@gmail.com, minarushdyrady@gmail.com",
       "available": "Project working hours"
     },
     {
-      "name": "<Academic supervisor name>",
+      "name": "Dr. Hesham Hamed Amin",
       "role": "Supervising Professor",
-      "channel": "email: <fill in>",
+      "channel": "email: (to be provided)",
+      "available": "University hours"
+    },
+    {
+      "name": "EmadelDin Abbas Mazied",
+      "role": "Supervising Professor",
+      "channel": "email: (to be provided)",
       "available": "University hours"
     }
   ],
