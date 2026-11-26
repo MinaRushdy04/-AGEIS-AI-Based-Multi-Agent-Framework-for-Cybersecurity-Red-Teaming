@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import shlex
+import socket
 import subprocess
 import time
 from typing import Annotated
@@ -101,10 +102,29 @@ def _load_roe(path: str) -> dict:
         "forbidden_destinations": {d.lower() for d in machine.get("forbidden_destinations", [])},
         "forbidden_patterns": patterns,
     }
+    # Defense in depth: also resolve the scope hostnames to IPs so a host reached
+    # by its IP instead of its name is still matched. (The air-gapped sandbox-net
+    # is the PRIMARY control and already blocks out-of-scope hosts; this just
+    # closes the name-vs-IP gap in the RoE layer itself.)
+    roe["out_of_scope"] |= _resolve_ips(roe["out_of_scope"])
+    roe["in_scope"] |= _resolve_ips(roe["in_scope"])
+
     log.info("RoE loaded: in_scope=%s out_of_scope=%s forbidden_patterns=%d destinations=%d",
              sorted(roe["in_scope"]), sorted(roe["out_of_scope"]),
              len(roe["forbidden_patterns"]), len(roe["forbidden_destinations"]))
     return roe
+
+
+def _resolve_ips(names: set[str]) -> set[str]:
+    """Best-effort A-record lookup for each name; unresolvable names are skipped
+    (they are unreachable from the air-gapped sandbox anyway)."""
+    ips: set[str] = set()
+    for name in names:
+        try:
+            ips.update(socket.gethostbyname_ex(name)[2])
+        except OSError:
+            pass
+    return ips
 
 
 ROE = _load_roe(ROE_FILE)
