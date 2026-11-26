@@ -47,12 +47,17 @@ _TOKEN = os.environ.get("SANDBOX_TOKEN") or None  # unset = open (dev)
 # so the whitelisted binary is the ONLY program that runs. Shell interpreters
 # (bash/sh/python3) are deliberately NOT whitelisted: allowing them would let
 # `bash -c '<anything>'` bypass the whitelist and run arbitrary commands.
+#
+# metasploit (msfconsole/msfvenom) is also NOT in the default list: `msfconsole
+# -x` can run arbitrary OS commands and spawn shells, which would defeat the
+# whitelist. Enable it explicitly via SANDBOX_WHITELIST only for an engagement
+# that genuinely needs it (least privilege).
 WHITELIST = set(
     t.strip()
     for t in os.environ.get(
         "SANDBOX_WHITELIST",
         "nmap,gobuster,nikto,sqlmap,hydra,curl,wget,whatweb,"
-        "msfconsole,msfvenom,linpeas,cat,ls,grep,head,tail,"
+        "linpeas,cat,ls,grep,head,tail,"
         "echo,whoami,id",
     ).split(",")
     if t.strip()
