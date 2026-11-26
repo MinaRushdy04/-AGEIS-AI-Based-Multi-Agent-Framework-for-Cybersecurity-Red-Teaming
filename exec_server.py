@@ -14,6 +14,9 @@ http://sandbox:9999/execute. No internet needed at runtime.
 
 Step-4 safety features: command whitelist, per-command timeout, output cap,
 and a log line for every command (also useful later for MITRE mapping / audit).
+Commands run WITHOUT a shell (shell=False on the parsed argv), so shell
+metacharacters (; | && $() `) cannot chain extra commands — the whitelisted
+binary is the only program that runs. Shell interpreters are not whitelisted.
 RoE enforcement: every command is also checked against plan/roe.json's
 machine_enforcement block (scope hosts, forbidden command patterns, forbidden
 destinations) before it runs — the execution-chokepoint guard rail.
@@ -27,6 +30,7 @@ import logging
 import os
 import re
 import shlex
+import socket
 import subprocess
 import time
 from typing import Annotated
@@ -40,13 +44,21 @@ MAX_OUTPUT_BYTES = int(os.environ.get("SANDBOX_MAX_OUTPUT", str(1_000_000)))  # 
 WORKSPACE = os.environ.get("SANDBOX_ROOT_DIR", "/workspace")
 _TOKEN = os.environ.get("SANDBOX_TOKEN") or None  # unset = open (dev)
 
-# Allowed first-token binaries. Extend/trim for your engagement.
+# Allowed binaries. The command is parsed and run WITHOUT a shell (shell=False),
+# so the whitelisted binary is the ONLY program that runs. Shell interpreters
+# (bash/sh/python3) are deliberately NOT whitelisted: allowing them would let
+# `bash -c '<anything>'` bypass the whitelist and run arbitrary commands.
+#
+# metasploit (msfconsole/msfvenom) is also NOT in the default list: `msfconsole
+# -x` can run arbitrary OS commands and spawn shells, which would defeat the
+# whitelist. Enable it explicitly via SANDBOX_WHITELIST only for an engagement
+# that genuinely needs it (least privilege).
 WHITELIST = set(
     t.strip()
     for t in os.environ.get(
         "SANDBOX_WHITELIST",
         "nmap,gobuster,nikto,sqlmap,hydra,curl,wget,whatweb,"
-        "msfconsole,msfvenom,linpeas,python3,bash,sh,cat,ls,grep,head,tail,"
+        "linpeas,cat,ls,grep,head,tail,"
         "echo,whoami,id",
     ).split(",")
     if t.strip()
@@ -90,10 +102,29 @@ def _load_roe(path: str) -> dict:
         "forbidden_destinations": {d.lower() for d in machine.get("forbidden_destinations", [])},
         "forbidden_patterns": patterns,
     }
+    # Defense in depth: also resolve the scope hostnames to IPs so a host reached
+    # by its IP instead of its name is still matched. (The air-gapped sandbox-net
+    # is the PRIMARY control and already blocks out-of-scope hosts; this just
+    # closes the name-vs-IP gap in the RoE layer itself.)
+    roe["out_of_scope"] |= _resolve_ips(roe["out_of_scope"])
+    roe["in_scope"] |= _resolve_ips(roe["in_scope"])
+
     log.info("RoE loaded: in_scope=%s out_of_scope=%s forbidden_patterns=%d destinations=%d",
              sorted(roe["in_scope"]), sorted(roe["out_of_scope"]),
              len(roe["forbidden_patterns"]), len(roe["forbidden_destinations"]))
     return roe
+
+
+def _resolve_ips(names: set[str]) -> set[str]:
+    """Best-effort A-record lookup for each name; unresolvable names are skipped
+    (they are unreachable from the air-gapped sandbox anyway)."""
+    ips: set[str] = set()
+    for name in names:
+        try:
+            ips.update(socket.gethostbyname_ex(name)[2])
+        except OSError:
+            pass
+    return ips
 
 
 ROE = _load_roe(ROE_FILE)
@@ -158,15 +189,6 @@ def auth(authorization: Annotated[str | None, Header()] = None) -> None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
 
 
-def _first_binary(command: str) -> str:
-    """The binary the command starts with (basename), for the whitelist check."""
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return ""
-    return os.path.basename(tokens[0]) if tokens else ""
-
-
 # ── Routes ──────────────────────────────────────────────────────────────────
 @app.get("/healthz")
 def healthz() -> dict:
@@ -175,7 +197,18 @@ def healthz() -> dict:
 
 @app.post("/execute", response_model=ExecuteResponse)
 def execute(req: ExecuteRequest, _: Annotated[None, Depends(auth)]) -> ExecuteResponse:
-    binary = _first_binary(req.command)
+    # Parse into an argv list and run WITHOUT a shell. This is what makes the
+    # whitelist sound: shell metacharacters (; | && $() `) become literal
+    # arguments instead of chaining extra commands, so only argv[0] ever runs.
+    try:
+        argv = shlex.split(req.command)
+    except ValueError as exc:
+        log.warning("REJECTED (unparseable): %s | %s", exc, req.command)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"could not parse command: {exc}")
+    if not argv:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "empty command")
+
+    binary = os.path.basename(argv[0])
     if binary not in WHITELIST:
         log.warning("REJECTED (not whitelisted): %s", req.command)
         raise HTTPException(
@@ -195,7 +228,7 @@ def execute(req: ExecuteRequest, _: Annotated[None, Depends(auth)]) -> ExecuteRe
     start = time.time()
     try:
         proc = subprocess.run(
-            ["bash", "-lc", req.command],
+            argv,                       # run the parsed argv directly — NO shell
             capture_output=True,
             text=True,
             timeout=timeout,

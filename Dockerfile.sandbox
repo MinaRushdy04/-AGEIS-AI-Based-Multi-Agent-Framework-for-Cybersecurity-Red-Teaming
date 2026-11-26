@@ -74,8 +74,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && ln -sf "$CW" /usr/share/wordlists/dirb/common.txt \
     && test -f /usr/share/wordlists/dirb/common.txt
 
+# ---- Least privilege: run the daemon and all tools as a NON-ROOT user -------
+# So a powerful tool that gets abused cannot act with root authority. Tools
+# that normally prefer root (e.g. nmap SYN scan) fall back to unprivileged
+# modes (TCP connect), which is enough for web-application testing.
+RUN useradd --create-home --shell /bin/bash redteam \
+    && mkdir -p /workspace \
+    && chown -R redteam:redteam /workspace
+
 WORKDIR /workspace
 EXPOSE 9999
+USER redteam
 # The sandbox now runs the exec daemon instead of sleeping.
 # Agents call http://sandbox:9999/execute  (they must join sandbox-net).
 CMD ["uvicorn", "exec_server:app", "--app-dir", "/opt", "--host", "0.0.0.0", "--port", "9999"]

@@ -48,6 +48,7 @@ Expected shape of an Exploit Finding for this Verifier to work with
 from __future__ import annotations
 
 import re
+import time
 
 from graduation_project.core.contracts import AgentResult, Finding, Task
 from graduation_project.core.outcomes import Outcome
@@ -158,6 +159,8 @@ class VerifierAgent:
         if not payload or not str(payload).strip():
             return "REJECTED", "no payload recorded to reproduce", None
 
+        # Time the reproduction — needed for time-based blind checks below.
+        start = time.perf_counter()
         try:
             fresh_response = self._reproduce(task, finding)
         except ReproductionUnavailable as exc:
@@ -173,6 +176,20 @@ class VerifierAgent:
                     None,
                 )
             return "REJECTED", f"reproduction not available ({exc}); no evidence either", None
+        elapsed = time.perf_counter() - start
+
+        # Time-based blind: the Exploit agent supplies expected_min_response_time
+        # instead of a content signature; confirm by the reproduction's RESPONSE
+        # TIME (a slow response = the injected SLEEP really executed).
+        min_time = finding.data.get("expected_min_response_time")
+        if min_time is not None:
+            if elapsed >= float(min_time):
+                return ("CONFIRMED",
+                        f"reproduced response delayed {elapsed:.1f}s (>= {min_time}s expected)",
+                        fresh_response)
+            return ("REJECTED",
+                    f"reproduced response was fast ({elapsed:.1f}s < {min_time}s expected)",
+                    fresh_response)
 
         reason = self._compare(finding, fresh_response)
         if reason is None:
