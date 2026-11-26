@@ -1,0 +1,72 @@
+{
+  "engagement_name": "AEGIS Closed Training Lab — Web Red-Team",
+  "client": "AEGIS Graduation Project (self-owned, isolated lab)",
+  "start_date": "2026-11-23",
+  "end_date": "2027-06-30",
+  "engagement_type": "internal-training-lab",
+  "testing_window": "24/7 (isolated lab, no production systems involved)",
+  "in_scope": [
+    {"target": "dvwa", "type": "application", "notes": "DVWA web application — the authorized web target. Reached inside sandbox-net as http://dvwa/ ."}
+  ],
+  "out_of_scope": [
+    {"target": "sandbox",         "type": "host",    "notes": "The Kali attacker container itself — never a target."},
+    {"target": "bridge",          "type": "host",    "notes": "Network bridge placeholder."},
+    {"target": "infra",           "type": "host",    "notes": "Management-plane service."},
+    {"target": "metasploitable2", "type": "host",    "notes": "Reserve target — NOT authorized until explicitly moved to in_scope."},
+    {"target": "management-net",  "type": "network", "notes": "Management plane — strictly off-limits."},
+    {"target": "internet",        "type": "network", "notes": "The public internet. The lab is air-gapped and must stay air-gapped."}
+  ],
+  "prohibited_actions": [
+    "Attacking any host other than the in-scope web target(s).",
+    "Any traffic that leaves sandbox-net (the lab is isolated by design).",
+    "Denial of Service (DoS / DDoS) against any target.",
+    "Destructive commands (deleting or modifying files outside the agent workspace).",
+    "Attempting to escape the sandbox container or reach the host / management plane."
+  ],
+  "permitted_actions": [
+    "Web-application testing against in-scope targets only: reconnaissance, scanning, and exploitation of OWASP-class web vulnerabilities.",
+    "Using the installed tools (nmap, nikto, gobuster, sqlmap, curl) against in-scope web targets only."
+  ],
+  "escalation_contacts": [
+    {
+      "name": "<Project team lead name>",
+      "role": "AEGIS Project Lead",
+      "channel": "email: <fill in>",
+      "available": "Project working hours"
+    },
+    {
+      "name": "<Academic supervisor name>",
+      "role": "Supervising Professor",
+      "channel": "email: <fill in>",
+      "available": "University hours"
+    }
+  ],
+  "incident_procedure": "Stop immediately, document the incident (timestamp, target, action), and notify the project team lead.",
+  "authorization_reference": "Closed academic training lab, owned and operated by the AEGIS project team. No third-party or production systems are involved. All testing is self-authorized within this isolated environment.",
+  "version": "1.1",
+  "last_updated": "2026-11-23T21:00:00",
+  "machine_enforcement": {
+    "in_scope": [
+      {"target": "dvwa", "type": "host"}
+    ],
+    "out_of_scope": [
+      {"target": "sandbox", "type": "host"},
+      {"target": "bridge", "type": "host"},
+      {"target": "infra", "type": "host"},
+      {"target": "metasploitable2", "type": "host"}
+    ],
+    "forbidden_destinations": [
+      "169.254.169.254",
+      "metadata.google.internal"
+    ],
+    "forbidden_command_patterns": [
+      "rm\\s+-rf\\s+/",
+      "mkfs",
+      "dd\\s+if=.*of=/dev/"
+    ],
+    "allow_cloud_metadata": false,
+    "allow_sensitive_tlds": false,
+    "min_inter_request_delay_ms": 0,
+    "max_concurrent_connections": null
+  }
+}
